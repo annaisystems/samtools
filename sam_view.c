@@ -24,7 +24,6 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.  */
 
 #include <config.h>
-
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -633,17 +632,19 @@ static void bam2fq_usage(FILE *to, const char *command)
 "  -t        copy RG, BC and QT tags to the %s header line\n",
     fq ? "FASTQ" : "FASTA");
     if (fq) fprintf(to,
-"  -v INT    default quality score if not given in file [1]\n");
+"  -v INT    default quality score if not given in file [1]\n"
+"  -z        select read assuming RTG mapping scheme [possible absence of primary read]\n");
     sam_global_opt_help(to, "-.--.");
 }
 
 typedef enum { READ_UNKNOWN = 0, READ_1 = 1, READ_2 = 2 } readpart;
 typedef enum { FASTA, FASTQ } fastfile;
+typedef enum { HAVE_NONE, HAVE_1, HAVE_2, HAVE_BOTH } rtg_state;
 typedef struct bam2fq_opts {
     char *fnse;
     char *fnr[3];
     char *fn_input; // pointer to input filename in argv do not free
-    bool has12, use_oq, copy_tags;
+    bool has12, use_oq, copy_tags, isrtg;
     int flag_on, flag_off;
     sam_global_args ga;
     fastfile filetype;
@@ -655,10 +656,11 @@ typedef struct bam2fq_state {
     FILE *fpse;
     FILE *fpr[3];
     bam_hdr_t *h;
-    bool has12, use_oq, copy_tags;
-    int flag_on, flag_off;
+    bool has12, use_oq, copy_tags, isrtg;
+    int flag_on, flag_off, rtg_reads;
     fastfile filetype;
     int def_qual;
+    char last_qname[UINT8_MAX];
 } bam2fq_state_t;
 
 static readpart which_readpart(const bam1_t *b)
@@ -765,6 +767,7 @@ static bool parse_opts(int argc, char *argv[], bam2fq_opts_t** opts_out)
     // Parse args
     bam2fq_opts_t* opts = calloc(1, sizeof(bam2fq_opts_t));
     opts->has12 = true;
+    opts->isrtg = false;
     opts->filetype = FASTQ;
     opts->def_qual = 1;
 
@@ -774,7 +777,7 @@ static bool parse_opts(int argc, char *argv[], bam2fq_opts_t** opts_out)
         SAM_OPT_GLOBAL_OPTIONS('-', 0, '-', '-', 0),
         { NULL, 0, NULL, 0 }
     };
-    while ((c = getopt_long(argc, argv, "0:1:2:f:F:nOs:tv:", lopts, NULL)) > 0) {
+    while ((c = getopt_long(argc, argv, "0:1:2:f:F:nOs:tv:z", lopts, NULL)) > 0) {
         switch (c) {
             case '0': opts->fnr[0] = optarg; break;
             case '1': opts->fnr[1] = optarg; break;
@@ -786,6 +789,7 @@ static bool parse_opts(int argc, char *argv[], bam2fq_opts_t** opts_out)
             case 's': opts->fnse = optarg; break;
             case 't': opts->copy_tags = true; break;
             case 'v': opts->def_qual = atoi(optarg); break;
+            case 'z': opts->isrtg = true; break;
             case '?': bam2fq_usage(stderr, argv[0]); free(opts); return false;
             default:
                 if (parse_sam_global_opt(c, optarg, lopts, &opts->ga) != 0) {
@@ -843,6 +847,9 @@ static bool init_state(const bam2fq_opts_t* opts, bam2fq_state_t** state_out)
     state->copy_tags = opts->copy_tags;
     state->filetype = opts->filetype;
     state->def_qual = opts->def_qual;
+    state->isrtg = opts->isrtg;
+    state->rtg_reads = HAVE_NONE;
+    memset(state->last_qname, 0, UINT8_MAX);
 
     state->fp = sam_open(opts->fn_input, "r");
     if (state->fp == NULL) {
@@ -999,10 +1006,29 @@ static bool bam2fq_mainloop(bam2fq_state_t *state)
         perror(NULL);
         return false;
     }
+    const bam1_core_t *c = &b->core;
     int64_t n_reads = 0; // Statistics
     kstring_t linebuf = { 0, 0, NULL }; // Buffer
     while (sam_read1(state->fp, state->h, b) >= 0) {
-        if (b->core.flag&(BAM_FSECONDARY|BAM_FSUPPLEMENTARY) // skip secondary and supplementary alignments
+        // handle the RTG BAM/CRAM that may have multiple secondary alignments, but no primary
+        if (state->isrtg
+            && (b->core.flag&(state->flag_on)) == state->flag_on             // or reads indicated by filter flags
+            && (b->core.flag&(state->flag_off)) == 0) {
+            // check if this is a new name
+            if (strcmp(bam_get_qname(b), state->last_qname) != 0) {
+                memset(state->last_qname, 0, UINT8_MAX);
+                memcpy(state->last_qname, bam_get_qname(b), c->l_qname-1);
+                state->rtg_reads = HAVE_NONE;
+            }
+            // make sure both reads have not been processed
+            if ((state->rtg_reads != HAVE_BOTH) && (state->rtg_reads != which_readpart(b))) {
+                // update the read state
+                state->rtg_reads += which_readpart(b);
+            }
+            // else skip this read
+            else continue;
+        } // non-RTG processing
+        else if (b->core.flag&(BAM_FSECONDARY|BAM_FSUPPLEMENTARY) // skip secondary and supplementary alignments
             || (b->core.flag&(state->flag_on)) != state->flag_on             // or reads indicated by filter flags
             || (b->core.flag&(state->flag_off)) != 0) continue;
         ++n_reads;
