@@ -52,7 +52,7 @@ INSTALL_DATA    = $(INSTALL) -m 644
 INSTALL_DIR     = $(MKDIR_P) -m 755
 
 
-PROGRAMS = samtools
+PROGRAMS = startools
 
 BUILT_MISC_PROGRAMS = \
 	misc/ace2sam misc/maq2sam-long misc/maq2sam-short \
@@ -134,7 +134,7 @@ lib:libbam.a
 libbam.a:$(LOBJS)
 	$(AR) -csru $@ $(LOBJS)
 
-samtools: $(AOBJS) libbam.a $(HTSLIB)
+startools: $(AOBJS) libbam.a $(HTSLIB)
 	$(CC) -pthread $(ALL_LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB_LIB) $(CURSES_LIB) -lm $(ALL_LIBS)
 
 bam_h = bam.h $(htslib_bgzf_h) $(htslib_sam_h)
